@@ -22,7 +22,7 @@ const SUBSCRIPTIONS = (process.env.SUBSCRIPTIONS || 'TaoRay,dontbesilent,karpath
   .filter(Boolean);
 const FETCH_INTERVAL_MINUTES = parseInt(process.env.FETCH_INTERVAL_MINUTES || '60', 10);
 const INCLUDE_REPLIES = process.env.INCLUDE_REPLIES === '1';
-const MAX_TWEETS = 500; // 内存里最多保留多少条
+const MAX_TWEETS = parseInt(process.env.MAX_TWEETS || '5000', 10); // 内存里最多保留多少条
 
 // 打开 App 触发抓取的节流阈值（分钟）：距离上次抓取超过 N 分钟才真去抓，避免连点狂抓
 const OPEN_FETCH_THROTTLE_MIN = parseInt(process.env.OPEN_FETCH_THROTTLE_MIN || '20', 10);
@@ -67,8 +67,8 @@ function cleanTweetText(raw) {
   return t;
 }
 
-async function fetchUserTweets(username) {
-  const url = `https://api.twitterapi.io/twitter/user/last_tweets?userName=${encodeURIComponent(username)}&includeReplies=${INCLUDE_REPLIES ? 'true' : 'false'}`;
+async function fetchUserTweets(username, cursor = '') {
+  const url = `https://api.twitterapi.io/twitter/user/last_tweets?userName=${encodeURIComponent(username)}&includeReplies=${INCLUDE_REPLIES ? 'true' : 'false'}${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`;
   const resp = await fetch(url, {
     headers: { 'X-API-Key': TWITTERAPI_KEY },
     timeout: 20000,
@@ -81,10 +81,16 @@ async function fetchUserTweets(username) {
   if (data.status && data.status !== 'success') {
     throw new Error(`API error: ${data.msg || data.message || 'unknown'}`);
   }
-  return (data.data && data.data.tweets) || data.tweets || [];
+  // 实测结构：顶层 { status, code, msg, data: { tweets }, has_next_page, next_cursor }
+  // 兼容旧结构：{ tweets, has_next_page, next_cursor }
+  const tweets = (data.data && data.data.tweets) || data.tweets || [];
+  const hasNextPage = !!(data.has_next_page || (data.data && data.data.has_next_page));
+  const nextCursor = data.next_cursor || (data.data && data.data.next_cursor) || '';
+  return { tweets, hasNextPage, nextCursor };
 }
 
-async function fetchAll(reason = 'unknown') {
+async function fetchAll(reason = 'unknown', pagesPerUser = 1, opts = {}) {
+  const { earlyStop = true } = opts;
   if (!TWITTERAPI_KEY) {
     console.error('[fetchAll] TWITTERAPI_KEY 未配置，跳过');
     return [];
@@ -97,29 +103,39 @@ async function fetchAll(reason = 'unknown') {
   try {
     const results = [];
     for (const username of SUBSCRIPTIONS) {
+      let inserted = 0, totalFetched = 0, pagesUsed = 0;
+      let cursor = '';
       try {
-        const tweets = await fetchUserTweets(username);
-        let inserted = 0;
-        for (const tw of tweets) {
-          if (tw.retweeted_tweet && !tw.text) continue;
-          const text = cleanTweetText(tw.text);
-          if (!text || text.length < 3) continue;
-          const authorName = (tw.author && (tw.author.name || tw.author.userName)) || username;
-          const pubDate = tw.createdAt ? Date.parse(tw.createdAt) : Date.now();
-          const added = insertTweet({
-            id: `${username}_${tw.id}`,
-            username,
-            author: authorName,
-            content: text,
-            link: tw.url || `https://x.com/${username}/status/${tw.id}`,
-            pub_date: isNaN(pubDate) ? Date.now() : pubDate,
-            fetched_at: Date.now(),
-          });
-          if (added) inserted++;
+        for (let page = 0; page < pagesPerUser; page++) {
+          const { tweets, hasNextPage, nextCursor } = await fetchUserTweets(username, cursor);
+          pagesUsed++;
+          totalFetched += tweets.length;
+          let pageInserted = 0;
+          for (const tw of tweets) {
+            if (tw.retweeted_tweet && !tw.text) continue;
+            const text = cleanTweetText(tw.text);
+            if (!text || text.length < 3) continue;
+            const authorName = (tw.author && (tw.author.name || tw.author.userName)) || username;
+            const pubDate = tw.createdAt ? Date.parse(tw.createdAt) : Date.now();
+            const added = insertTweet({
+              id: `${username}_${tw.id}`,
+              username,
+              author: authorName,
+              content: text,
+              link: tw.url || `https://x.com/${username}/status/${tw.id}`,
+              pub_date: isNaN(pubDate) ? Date.now() : pubDate,
+              fetched_at: Date.now(),
+            });
+            if (added) { inserted++; pageInserted++; }
+          }
+          // 增量停止（仅在 earlyStop=true 时启用；backfill 场景禁用，一直翻到 pagesPerUser）
+          if (earlyStop && page > 0 && pageInserted === 0) break;
+          if (!hasNextPage || !nextCursor) break;
+          cursor = nextCursor;
         }
-        results.push({ username, ok: true, inserted, total: tweets.length });
+        results.push({ username, ok: true, inserted, totalFetched, pagesUsed });
       } catch (e) {
-        results.push({ username, ok: false, error: e.message });
+        results.push({ username, ok: false, error: e.message, pagesUsed });
       }
     }
     lastFetchAt = Date.now();
@@ -221,8 +237,17 @@ app.post('/api/mark-all', (req, res) => res.json({ ok: true }));
 app.post('/api/reset', (req, res) => res.json({ ok: true }));
 
 app.post('/api/fetch-now', async (req, res) => {
-  const result = await fetchAll('manual');
+  const result = await fetchAll('manual', 1);
   res.json({ ok: true, result, store_size: tweetsStore.size });
+});
+
+// 一次性历史回填：每个博主翻多少页（默认 5 页 = 100 条/人）
+// 用法：GET https://x-reader.zeabur.app/api/backfill?pages=5
+// 增量停止逻辑：如果某页没抓到新推文，自动停这个用户的翻页
+app.get('/api/backfill', async (req, res) => {
+  const pages = Math.min(Math.max(parseInt(req.query.pages || '5', 10), 1), 25);
+  const result = await fetchAll('backfill', pages, { earlyStop: false });
+  res.json({ ok: true, pages_per_user: pages, result, store_size: tweetsStore.size });
 });
 
 app.get('/api/health', (req, res) => {
