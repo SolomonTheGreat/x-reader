@@ -45,6 +45,37 @@
       scrollbar-width: none;
     }
     .toolbar::-webkit-scrollbar { display: none; }
+
+    /* 筛选栏：博主 chips */
+    .filter-bar {
+      display: flex; gap: 6px; margin-top: 8px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      padding-bottom: 2px;
+    }
+    .filter-bar::-webkit-scrollbar { display: none; }
+    .chip {
+      flex-shrink: 0;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(51, 65, 85, 0.5);
+      color: #cbd5e1;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .chip:active { transform: scale(0.95); }
+    .chip.active {
+      background: rgba(59, 130, 246, 0.9);
+      color: white;
+      border-color: rgba(147, 197, 253, 0.4);
+    }
+
     button {
       -webkit-appearance: none; appearance: none;
       border: none; outline: none;
@@ -207,6 +238,10 @@
       <button id="play-all">▶ 全部播放</button>
       <button class="secondary" id="refresh">↻ 刷新</button>
       <button class="secondary" id="toggle-all">显示全部</button>
+      <button class="secondary" id="toggle-order" title="切换顺序">🕒 最新在前</button>
+    </div>
+    <div class="filter-bar" id="filter-bar">
+      <!-- 博主 chips 会动态插入 -->
     </div>
   </header>
 
@@ -238,10 +273,16 @@
 
   <script>
     const API = '';
-    let tweets = [];
+    let rawTweets = [];       // 服务端返回的原始数据
+    let tweets = [];          // 经过筛选+排序后的当前展示
+    let subscriptions = [];   // 订阅的博主列表
     let queue = [];
     let currentIndex = -1;
     let showAll = false;
+
+    // 筛选/排序状态（localStorage 记忆）
+    let activeUser = localStorage.getItem('xreader.filter') || 'ALL';  // 'ALL' 或某个 username
+    let order = localStorage.getItem('xreader.order') || 'newest';     // 'newest' | 'oldest' | 'random'
 
     // 从 localStorage 读取上次的倍速
     let playbackRate = parseFloat(localStorage.getItem('xreader.rate') || '1.0');
@@ -268,13 +309,59 @@
       return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     }
 
+    // Fisher-Yates 洗牌
+    function shuffle(arr) {
+      const a = arr.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    function applyFilterAndSort() {
+      let list = rawTweets;
+      if (activeUser !== 'ALL') {
+        list = list.filter(t => t.username === activeUser);
+      }
+      if (order === 'newest') {
+        list = list.slice().sort((a, b) => (b.pub_date || 0) - (a.pub_date || 0));
+      } else if (order === 'oldest') {
+        list = list.slice().sort((a, b) => (a.pub_date || 0) - (b.pub_date || 0));
+      } else if (order === 'random') {
+        list = shuffle(list);
+      }
+      tweets = list;
+    }
+
+    function orderLabel() {
+      return order === 'newest' ? '🕒 最新在前'
+           : order === 'oldest' ? '🕒 最早在前'
+           : '🔀 随机顺序';
+    }
+
+    function renderFilterBar() {
+      const bar = $('filter-bar');
+      // 每个博主的未听数
+      const counts = {};
+      rawTweets.forEach(t => { counts[t.username] = (counts[t.username] || 0) + 1; });
+      const chips = [
+        `<div class="chip ${activeUser === 'ALL' ? 'active' : ''}" data-user="ALL">全部 · ${rawTweets.length}</div>`,
+        ...subscriptions.map(u => `<div class="chip ${activeUser === u ? 'active' : ''}" data-user="${u}">@${u}${counts[u] ? ' · ' + counts[u] : ''}</div>`),
+      ];
+      bar.innerHTML = chips.join('');
+    }
+
     async function loadFeed() {
       try {
         const r = await fetch(API + '/api/feed' + (showAll ? '?all=1' : ''));
         const data = await r.json();
-        tweets = data.tweets || [];
-        $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}`;
-        $('sub-badge').textContent = `订阅 ${data.subscriptions.length} 人`;
+        rawTweets = data.tweets || [];
+        subscriptions = data.subscriptions || [];
+        applyFilterAndSort();
+        $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}${activeUser !== 'ALL' ? ' · @' + activeUser : ''}`;
+        $('sub-badge').textContent = `订阅 ${subscriptions.length} 人`;
+        renderFilterBar();
         renderList();
       } catch (e) {
         toast('加载失败: ' + e.message);
@@ -343,6 +430,28 @@
       $('toggle-all').textContent = showAll ? '只看未听' : '显示全部';
       loadFeed();
     };
+    // 播放顺序切换：newest → oldest → random → newest ...
+    $('toggle-order').onclick = () => {
+      order = order === 'newest' ? 'oldest' : order === 'oldest' ? 'random' : 'newest';
+      localStorage.setItem('xreader.order', order);
+      $('toggle-order').textContent = orderLabel();
+      applyFilterAndSort();
+      renderList();
+      toast(order === 'random' ? '🔀 已切换到随机顺序' : order === 'oldest' ? '最早在前' : '最新在前');
+    };
+    $('toggle-order').textContent = orderLabel();
+
+    // 博主 chips 点击
+    $('filter-bar').addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if (!chip) return;
+      activeUser = chip.dataset.user;
+      localStorage.setItem('xreader.filter', activeUser);
+      applyFilterAndSort();
+      $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}${activeUser !== 'ALL' ? ' · @' + activeUser : ''}`;
+      renderFilterBar();
+      renderList();
+    });
 
     // 倍速滑杆
     const slider = $('speed-slider');
