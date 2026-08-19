@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="X Reader" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <title>X Reader</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      min-height: 100vh;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      padding: 14px 16px 10px;
+    }
+    h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+    .subtitle { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+    .status-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 10px; border-radius: 999px;
+      background: rgba(59, 130, 246, 0.15); color: #93c5fd;
+      font-size: 12px; font-weight: 500;
+    }
+    .toolbar {
+      display: flex; gap: 8px; margin-top: 10px;
+    }
+    button {
+      -webkit-appearance: none; appearance: none;
+      border: none; outline: none;
+      font: inherit; cursor: pointer;
+      padding: 10px 14px; border-radius: 10px;
+      background: rgba(59, 130, 246, 0.9); color: white;
+      font-weight: 600; font-size: 14px;
+      transition: opacity 0.15s;
+    }
+    button:active { opacity: 0.7; }
+    button.secondary { background: rgba(71, 85, 105, 0.6); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    main { padding: 8px 12px 200px; }
+    .empty {
+      text-align: center; padding: 60px 24px; color: #64748b;
+    }
+    .empty-emoji { font-size: 48px; margin-bottom: 12px; }
+
+    .tweet {
+      background: rgba(30, 41, 59, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+      border-radius: 14px;
+      padding: 14px;
+      margin-bottom: 10px;
+      transition: background 0.15s, border 0.15s;
+    }
+    .tweet.playing {
+      background: rgba(59, 130, 246, 0.15);
+      border-color: rgba(59, 130, 246, 0.4);
+    }
+    .tweet.listened { opacity: 0.4; }
+    .tweet-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .author { font-size: 13px; font-weight: 600; color: #93c5fd; }
+    .time { font-size: 11px; color: #64748b; }
+    .content { font-size: 15px; line-height: 1.55; color: #e2e8f0; word-wrap: break-word; }
+    .tweet-actions {
+      display: flex; gap: 6px; margin-top: 10px;
+    }
+    .tweet-actions button {
+      padding: 6px 12px; font-size: 13px;
+      background: rgba(51, 65, 85, 0.5);
+    }
+    .tweet-actions button.play-btn { background: rgba(59, 130, 246, 0.7); }
+
+    /* 底部播放条 */
+    .player {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: rgba(15, 23, 42, 0.98);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-top: 1px solid rgba(148, 163, 184, 0.15);
+      padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+      transform: translateY(120%);
+      transition: transform 0.3s ease;
+      z-index: 20;
+    }
+    .player.active { transform: translateY(0); }
+    .player-info {
+      font-size: 12px; color: #94a3b8; margin-bottom: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .player-content {
+      font-size: 14px; color: #e2e8f0; margin-bottom: 8px;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .player-controls {
+      display: flex; align-items: center; justify-content: center; gap: 20px;
+    }
+    .player-btn {
+      background: transparent; padding: 8px;
+      font-size: 22px; color: #e2e8f0;
+    }
+    .player-btn.main {
+      background: white; color: #0f172a;
+      width: 52px; height: 52px; border-radius: 999px;
+      font-size: 20px; font-weight: 700;
+    }
+    .toast {
+      position: fixed; bottom: 200px; left: 50%; transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 10px 18px; border-radius: 999px;
+      font-size: 13px; z-index: 30;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>X Reader</h1>
+    <div class="subtitle" id="subtitle">通勤听推文 · 中英混读</div>
+    <div class="status-bar">
+      <span class="badge" id="count-badge">加载中…</span>
+      <span class="badge" id="sub-badge"></span>
+    </div>
+    <div class="toolbar">
+      <button id="play-all">▶ 全部播放</button>
+      <button class="secondary" id="refresh">刷新</button>
+      <button class="secondary" id="toggle-all">显示全部</button>
+    </div>
+  </header>
+
+  <main id="list">
+    <div class="empty">
+      <div class="empty-emoji">⏳</div>
+      <div>加载中…</div>
+    </div>
+  </main>
+
+  <div class="player" id="player">
+    <div class="player-info" id="player-info">--</div>
+    <div class="player-content" id="player-content">--</div>
+    <div class="player-controls">
+      <button class="player-btn" id="btn-prev">⏮</button>
+      <button class="player-btn main" id="btn-play">▶</button>
+      <button class="player-btn" id="btn-next">⏭</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <audio id="audio" preload="auto"></audio>
+
+  <script>
+    const API = '';
+    let tweets = [];
+    let queue = [];
+    let currentIndex = -1;
+    let showAll = false;
+
+    const $ = (id) => document.getElementById(id);
+    const audio = $('audio');
+
+    function toast(msg) {
+      const t = $('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2000);
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      const now = Date.now();
+      const diff = now - ts;
+      if (diff < 60000) return '刚刚';
+      if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+      if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+      return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    async function loadFeed() {
+      try {
+        const r = await fetch(API + '/api/feed' + (showAll ? '?all=1' : ''));
+        const data = await r.json();
+        tweets = data.tweets || [];
+        $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}`;
+        $('sub-badge').textContent = `订阅 ${data.subscriptions.length} 人`;
+        renderList();
+      } catch (e) {
+        toast('加载失败: ' + e.message);
+      }
+    }
+
+    function renderList() {
+      const listEl = $('list');
+      if (!tweets.length) {
+        listEl.innerHTML = `<div class="empty"><div class="empty-emoji">🎉</div><div>暂无${showAll ? '' : '未听'}推文<br /><small style="color:#475569">系统每 60 分钟自动抓取一次</small></div></div>`;
+        return;
+      }
+      listEl.innerHTML = tweets.map((t, i) => `
+        <div class="tweet ${t.listened ? 'listened' : ''}" data-id="${t.id}" data-idx="${i}">
+          <div class="tweet-head">
+            <span class="author">@${t.username}</span>
+            <span class="time">${fmtTime(t.pub_date)}</span>
+          </div>
+          <div class="content">${escapeHtml(t.content)}</div>
+          <div class="tweet-actions">
+            <button class="play-btn" data-action="play" data-idx="${i}">▶ 播放</button>
+            <button data-action="mark" data-id="${t.id}">✓ 标已听</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // 事件委托
+    document.addEventListener('click', async (e) => {
+      const t = e.target.closest('button');
+      if (!t) return;
+      const action = t.dataset.action;
+      const idx = t.dataset.idx;
+      const id = t.dataset.id;
+
+      if (action === 'play') {
+        queue = tweets.slice(parseInt(idx, 10));
+        currentIndex = 0;
+        playCurrent();
+      } else if (action === 'mark') {
+        await fetch(API + '/api/mark', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        });
+        loadFeed();
+      }
+    });
+
+    $('play-all').onclick = () => {
+      if (!tweets.length) { toast('队列为空'); return; }
+      queue = [...tweets];
+      currentIndex = 0;
+      playCurrent();
+    };
+    $('refresh').onclick = () => {
+      toast('刷新中…');
+      loadFeed();
+    };
+    $('toggle-all').onclick = () => {
+      showAll = !showAll;
+      $('toggle-all').textContent = showAll ? '只看未听' : '显示全部';
+      loadFeed();
+    };
+
+    // 播放器
+    async function playCurrent() {
+      if (currentIndex < 0 || currentIndex >= queue.length) {
+        stopPlayer();
+        return;
+      }
+      const t = queue[currentIndex];
+      $('player').classList.add('active');
+      $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}`;
+      $('player-content').textContent = t.content;
+      $('btn-play').textContent = '⏸';
+
+      // 高亮当前播放的卡片
+      document.querySelectorAll('.tweet').forEach(el => {
+        el.classList.toggle('playing', el.dataset.id === t.id);
+      });
+
+      // 更新 iOS 锁屏信息
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: t.content.slice(0, 80),
+          artist: '@' + t.username,
+          album: 'X Reader',
+        });
+      }
+
+      try {
+        const r = await fetch(API + '/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: t.content }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.error || 'TTS 失败');
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        audio.src = url;
+        await audio.play();
+      } catch (e) {
+        toast('播放失败: ' + e.message);
+        setTimeout(nextTrack, 1500);
+      }
+    }
+
+    function stopPlayer() {
+      audio.pause();
+      $('player').classList.remove('active');
+      $('btn-play').textContent = '▶';
+      document.querySelectorAll('.tweet.playing').forEach(el => el.classList.remove('playing'));
+      currentIndex = -1;
+    }
+
+    async function nextTrack() {
+      // 当前那条标记为已听
+      if (currentIndex >= 0 && queue[currentIndex]) {
+        const id = queue[currentIndex].id;
+        fetch(API + '/api/mark', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        }).catch(() => {});
+      }
+      currentIndex++;
+      if (currentIndex >= queue.length) {
+        toast('播放完毕');
+        stopPlayer();
+        loadFeed();
+        return;
+      }
+      playCurrent();
+    }
+
+    function prevTrack() {
+      if (currentIndex > 0) {
+        currentIndex--;
+        playCurrent();
+      }
+    }
+
+    audio.addEventListener('ended', nextTrack);
+    $('btn-play').onclick = () => {
+      if (audio.paused) { audio.play(); $('btn-play').textContent = '⏸'; }
+      else { audio.pause(); $('btn-play').textContent = '▶'; }
+    };
+    $('btn-next').onclick = nextTrack;
+    $('btn-prev').onclick = prevTrack;
+
+    // iOS 锁屏媒体控制
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => audio.play());
+      navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+      navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
+      navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
+    }
+
+    // Service Worker（PWA 安装 & 离线壳）
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    loadFeed();
+    // 每 5 分钟自动刷一次列表（当前有新推文时能看到）
+    setInterval(loadFeed, 5 * 60 * 1000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.zeabur.app/template.json",
+  "name": "x-reader",
+  "build": {
+    "command": "npm install --production"
+  },
+  "start": {
+    "command": "node server.js"
+  }
+}
