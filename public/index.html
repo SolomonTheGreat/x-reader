@@ -280,6 +280,30 @@
     let currentIndex = -1;
     let showAll = false;
 
+    // 已听状态：localStorage 持久化到浏览器（服务端不再存）
+    const LISTENED_KEY = 'xreader.listened.v1';
+    function loadListened() {
+      try {
+        const raw = localStorage.getItem(LISTENED_KEY);
+        return new Set(raw ? JSON.parse(raw) : []);
+      } catch (e) { return new Set(); }
+    }
+    function saveListened(set) {
+      try {
+        // 保留最近 2000 条，避免无限膨胀
+        const arr = [...set].slice(-2000);
+        localStorage.setItem(LISTENED_KEY, JSON.stringify(arr));
+      } catch (e) {}
+    }
+    let listenedSet = loadListened();
+    function markListened(id) {
+      listenedSet.add(id);
+      saveListened(listenedSet);
+    }
+    function isListened(id) {
+      return listenedSet.has(id);
+    }
+
     // 筛选/排序状态（localStorage 记忆）
     let activeUser = localStorage.getItem('xreader.filter') || 'ALL';  // 'ALL' 或某个 username
     let order = localStorage.getItem('xreader.order') || 'newest';     // 'newest' | 'oldest' | 'random'
@@ -321,6 +345,10 @@
 
     function applyFilterAndSort() {
       let list = rawTweets;
+      // 已听过滤（服务端已不再过滤，客户端根据 localStorage 判断）
+      if (!showAll) {
+        list = list.filter(t => !isListened(t.id));
+      }
       if (activeUser !== 'ALL') {
         list = list.filter(t => t.username === activeUser);
       }
@@ -354,7 +382,7 @@
 
     async function loadFeed() {
       try {
-        const r = await fetch(API + '/api/feed' + (showAll ? '?all=1' : ''));
+        const r = await fetch(API + '/api/feed');
         const data = await r.json();
         rawTweets = data.tweets || [];
         subscriptions = data.subscriptions || [];
@@ -375,7 +403,7 @@
         return;
       }
       listEl.innerHTML = tweets.map((t, i) => `
-        <div class="tweet ${t.listened ? 'listened' : ''}" data-id="${t.id}" data-idx="${i}">
+        <div class="tweet ${isListened(t.id) ? 'listened' : ''}" data-id="${t.id}" data-idx="${i}">
           <div class="tweet-head">
             <span class="author">@${t.username}</span>
             <span class="time">${fmtTime(t.pub_date)}</span>
@@ -406,12 +434,10 @@
         currentIndex = 0;
         playCurrent();
       } else if (action === 'mark') {
-        await fetch(API + '/api/mark', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id }),
-        });
-        loadFeed();
+        markListened(id);
+        applyFilterAndSort();
+        renderList();
+        $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}${activeUser !== 'ALL' ? ' · @' + activeUser : ''}`;
       }
     });
 
@@ -428,7 +454,9 @@
     $('toggle-all').onclick = () => {
       showAll = !showAll;
       $('toggle-all').textContent = showAll ? '只看未听' : '显示全部';
-      loadFeed();
+      applyFilterAndSort();
+      $('count-badge').textContent = `${tweets.length} 条${showAll ? '' : ' 未听'}${activeUser !== 'ALL' ? ' · @' + activeUser : ''}`;
+      renderList();
     };
     // 播放顺序切换：newest → oldest → random → newest ...
     $('toggle-order').onclick = () => {
@@ -537,12 +565,7 @@
 
     async function nextTrack() {
       if (currentIndex >= 0 && queue[currentIndex]) {
-        const id = queue[currentIndex].id;
-        fetch(API + '/api/mark', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id }),
-        }).catch(() => {});
+        markListened(queue[currentIndex].id);
       }
       currentIndex++;
       if (currentIndex >= queue.length) {
