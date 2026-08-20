@@ -153,8 +153,8 @@
       line-height: 1.4;
     }
     .player-controls {
-      display: flex; align-items: center; justify-content: center; gap: 24px;
-      margin-bottom: 10px;
+      display: flex; align-items: center; justify-content: center; gap: 16px;
+      margin-bottom: 4px;
     }
     .player-btn {
       background: transparent; padding: 8px; min-height: 44px;
@@ -203,34 +203,22 @@
       transition: left 0.15s linear;
     }
 
-    /* 倍速档位按钮组 */
-    .speed-row {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 0 0;
-      justify-content: center;
-    }
-    .speed-label-small {
-      font-size: 11px; color: #64748b; margin-right: 4px;
-    }
-    .speed-chip {
-      -webkit-appearance: none; appearance: none;
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      background: transparent;
-      color: #cbd5e1;
-      padding: 5px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
-      min-height: 30px;
-      transition: all 0.15s;
+    /* 倍速切换按钮（点击循环切换档位） */
+    .speed-toggle {
+      background: rgba(51, 65, 85, 0.6) !important;
+      color: #cbd5e1 !important;
+      width: auto !important;
+      height: 40px !important;
+      min-width: 52px;
+      padding: 0 12px !important;
+      border-radius: 999px !important;
+      font-size: 14px !important;
+      font-weight: 600 !important;
       font-variant-numeric: tabular-nums;
     }
-    .speed-chip:active { transform: scale(0.94); }
-    .speed-chip.active {
-      background: #3b82f6;
-      color: white;
-      border-color: #3b82f6;
+    .speed-toggle:active {
+      background: rgba(59, 130, 246, 0.6) !important;
+      transform: scale(0.92);
     }
 
     /* 加载中状态 */
@@ -310,10 +298,7 @@
       <button class="player-btn" id="btn-prev" aria-label="上一条">⏮</button>
       <button class="player-btn main" id="btn-play" aria-label="播放暂停">▶</button>
       <button class="player-btn" id="btn-next" aria-label="下一条">⏭</button>
-    </div>
-    <div class="speed-row" id="speed-row">
-      <span class="speed-label-small">倍速</span>
-      <!-- 档位按钮由 JS 动态渲染 -->
+      <button class="player-btn speed-toggle" id="speed-toggle" aria-label="切换倍速">1.0x</button>
     </div>
   </div>
 
@@ -531,13 +516,17 @@
       renderList();
     });
 
-    // 倍速档位按钮（0.5 / 1.0 / 1.5 / 2.0 / 2.5 / 3.0）
+    // 倍速切换按钮（点击循环切换档位）
+    // 六档：0.5 → 1.0 → 1.5 → 2.0 → 2.5 → 3.0 → 0.5 ...
     const SPEED_STEPS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
-    function renderSpeedChips() {
-      const row = $('speed-row');
-      // 保留第一个 label
-      row.innerHTML = '<span class="speed-label-small">倍速</span>' +
-        SPEED_STEPS.map(s => `<button class="speed-chip ${Math.abs(s - playbackRate) < 0.01 ? 'active' : ''}" data-speed="${s}">${s.toFixed(1)}x</button>`).join('');
+    function nextSpeed(cur) {
+      let idx = SPEED_STEPS.findIndex(s => Math.abs(s - cur) < 0.01);
+      if (idx === -1) idx = 1; // 找不到当前值，默认从 1.0 开始
+      return SPEED_STEPS[(idx + 1) % SPEED_STEPS.length];
+    }
+    function updateSpeedButton() {
+      const btn = $('speed-toggle');
+      if (btn) btn.textContent = playbackRate.toFixed(1) + 'x';
     }
     function applySpeedToAudio() {
       try {
@@ -547,15 +536,14 @@
         audio.webkitPreservesPitch = true;
       } catch (e) {}
     }
-    $('speed-row').addEventListener('click', (e) => {
-      const btn = e.target.closest('.speed-chip');
-      if (!btn) return;
-      playbackRate = parseFloat(btn.dataset.speed);
+    $('speed-toggle').addEventListener('click', () => {
+      playbackRate = nextSpeed(playbackRate);
       localStorage.setItem('xreader.rate', String(playbackRate));
-      renderSpeedChips();
+      updateSpeedButton();
       applySpeedToAudio();
+      toast(`倍速 ${playbackRate.toFixed(1)}x`);
     });
-    renderSpeedChips();
+    updateSpeedButton();
 
     // 进度条
     const progressFill = $('progress-fill');
