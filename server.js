@@ -133,7 +133,8 @@ async function fetchUserTweets(username, cursor = '') {
 }
 
 async function fetchAll(reason = 'unknown', pagesPerUser = 1, opts = {}) {
-  const { earlyStop = true } = opts;
+  const { earlyStop = true, users = null } = opts;
+  const targetUsers = users && users.length ? users : SUBSCRIPTIONS;
   if (!TWITTERAPI_KEY) {
     console.error('[fetchAll] TWITTERAPI_KEY 未配置，跳过');
     return [];
@@ -145,7 +146,7 @@ async function fetchAll(reason = 'unknown', pagesPerUser = 1, opts = {}) {
   fetchingNow = true;
   try {
     const results = [];
-    for (const username of SUBSCRIPTIONS) {
+    for (const username of targetUsers) {
       let inserted = 0, totalFetched = 0, pagesUsed = 0;
       let cursor = '';
       try {
@@ -290,8 +291,11 @@ app.post('/api/fetch-now', async (req, res) => {
 // 增量停止逻辑：如果某页没抓到新推文，自动停这个用户的翻页
 app.get('/api/backfill', async (req, res) => {
   const pages = Math.min(Math.max(parseInt(req.query.pages || '5', 10), 1), 25);
-  const result = await fetchAll('backfill', pages, { earlyStop: false });
-  res.json({ ok: true, pages_per_user: pages, result, store_size: tweetsStore.size });
+  const users = req.query.users
+    ? req.query.users.split(',').map(s => s.trim()).filter(Boolean)
+    : null;
+  const result = await fetchAll('backfill', pages, { earlyStop: false, users });
+  res.json({ ok: true, pages_per_user: pages, targeted_users: users || SUBSCRIPTIONS, result, store_size: tweetsStore.size });
 });
 
 app.get('/api/health', (req, res) => {
