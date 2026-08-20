@@ -405,12 +405,20 @@
 
     function renderFilterBar() {
       const bar = $('filter-bar');
-      // 每个博主的未听数
-      const counts = {};
-      rawTweets.forEach(t => { counts[t.username] = (counts[t.username] || 0) + 1; });
+      // 计算每个博主的"未听/总数"
+      const totalPerUser = {};
+      const unheardPerUser = {};
+      rawTweets.forEach(t => {
+        totalPerUser[t.username] = (totalPerUser[t.username] || 0) + 1;
+        if (!isListened(t.id)) unheardPerUser[t.username] = (unheardPerUser[t.username] || 0) + 1;
+      });
+      const totalUnheard = rawTweets.filter(t => !isListened(t.id)).length;
       const chips = [
-        `<div class="chip ${activeUser === 'ALL' ? 'active' : ''}" data-user="ALL">全部 · ${rawTweets.length}</div>`,
-        ...subscriptions.map(u => `<div class="chip ${activeUser === u ? 'active' : ''}" data-user="${u}">@${u}${counts[u] ? ' · ' + counts[u] : ''}</div>`),
+        `<div class="chip ${activeUser === 'ALL' ? 'active' : ''}" data-user="ALL">全部 · ${showAll ? rawTweets.length : totalUnheard}</div>`,
+        ...subscriptions.map(u => {
+          const num = showAll ? (totalPerUser[u] || 0) : (unheardPerUser[u] || 0);
+          return `<div class="chip ${activeUser === u ? 'active' : ''}" data-user="${u}">@${u} · ${num}</div>`;
+        }),
       ];
       bar.innerHTML = chips.join('');
     }

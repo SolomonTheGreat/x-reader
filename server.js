@@ -5,6 +5,7 @@
 
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const cron = require('node-cron');
 const fetch = require('node-fetch');
@@ -31,12 +32,53 @@ const DAILY_CRON = process.env.DAILY_CRON || '30 7 * * *';
 // 服务器时区（Zeabur 东京容器默认 UTC，需要 +8 得到北京时间早晨 7:30）
 const CRON_TZ = process.env.CRON_TZ || 'Asia/Shanghai';
 
-// ---------- 内存存储 ----------
+// ---------- 持久化存储 ----------
 // tweets: Map<id, { id, username, author, content, link, pub_date, fetched_at }>
 // 已听状态由前端 localStorage 管理，服务端不存
+// 磁盘持久化：Zeabur 挂载 /data 卷，写 tweets.json；本地开发写在项目目录
+const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : path.join(__dirname, 'data'));
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+const DB_FILE = path.join(DATA_DIR, 'tweets.json');
+
 const tweetsStore = new Map();
 let lastFetchAt = 0;   // 上次抓取时间（时间戳，ms）
 let fetchingNow = false; // 防止并发抓取
+
+// 启动时从磁盘恢复
+function loadFromDisk() {
+  try {
+    if (!fs.existsSync(DB_FILE)) return;
+    const raw = fs.readFileSync(DB_FILE, 'utf8');
+    const obj = JSON.parse(raw);
+    (obj.tweets || []).forEach(t => tweetsStore.set(t.id, t));
+    lastFetchAt = obj.lastFetchAt || 0;
+    console.log(`[persistence] 从磁盘加载 ${tweetsStore.size} 条推文 · ${DB_FILE}`);
+  } catch (e) {
+    console.error('[persistence] 加载失败（忽略，从空开始）:', e.message);
+  }
+}
+
+// 保存到磁盘（节流，避免频繁 IO）
+let saveTimer = null;
+function saveToDisk() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    try {
+      const obj = {
+        savedAt: Date.now(),
+        lastFetchAt,
+        tweets: [...tweetsStore.values()],
+      };
+      const tmp = DB_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(obj));
+      fs.renameSync(tmp, DB_FILE); // 原子替换
+      console.log(`[persistence] 已保存 ${obj.tweets.length} 条推文到 ${DB_FILE}`);
+    } catch (e) {
+      console.error('[persistence] 保存失败:', e.message);
+    }
+  }, 2000); // 2 秒节流：一批 insert 完成后统一写盘
+}
 
 function insertTweet(tw) {
   if (tweetsStore.has(tw.id)) return false;
@@ -47,6 +89,7 @@ function insertTweet(tw) {
       .sort((a, b) => (a[1].pub_date || 0) - (b[1].pub_date || 0))[0];
     if (oldest) tweetsStore.delete(oldest[0]);
   }
+  saveToDisk();
   return true;
 }
 
@@ -139,6 +182,7 @@ async function fetchAll(reason = 'unknown', pagesPerUser = 1, opts = {}) {
       }
     }
     lastFetchAt = Date.now();
+    saveToDisk(); // 更新 lastFetchAt 也要持久化
     console.log(`[fetchAll:${reason}]`, new Date().toISOString(), JSON.stringify(results), '| store=', tweetsStore.size);
     return results;
   } finally {
@@ -251,6 +295,13 @@ app.get('/api/backfill', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
+  let diskFileExists = false, diskFileSize = 0;
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      diskFileExists = true;
+      diskFileSize = fs.statSync(DB_FILE).size;
+    }
+  } catch (e) {}
   res.json({
     ok: true,
     total: tweetsStore.size,
@@ -262,6 +313,9 @@ app.get('/api/health', (req, res) => {
     daily_cron: DAILY_CRON,
     cron_tz: CRON_TZ,
     open_throttle_min: OPEN_FETCH_THROTTLE_MIN,
+    data_dir: DATA_DIR,
+    disk_file_exists: diskFileExists,
+    disk_file_size_bytes: diskFileSize,
   });
 });
 
@@ -272,7 +326,10 @@ app.listen(PORT, () => {
   console.log(`[x-reader] open throttle: ${OPEN_FETCH_THROTTLE_MIN} min`);
   console.log(`[x-reader] include replies: ${INCLUDE_REPLIES}`);
   console.log(`[x-reader] node: ${process.version}`);
-  // 启动时先抓一次（服务重启后立刻有内容）
+  console.log(`[x-reader] data dir: ${DATA_DIR}`);
+  // 从磁盘恢复
+  loadFromDisk();
+  // 启动时先抓一次（若磁盘为空，服务重启后立刻有内容）
   fetchAll('startup').catch(e => console.error('[startup fetch]', e));
   // 每天定时抓取（默认北京时间 07:30）
   cron.schedule(DAILY_CRON, () => {
