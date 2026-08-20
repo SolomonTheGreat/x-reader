@@ -166,41 +166,84 @@
       font-size: 20px; font-weight: 700; padding: 0;
     }
 
-    /* 倍速滑杆 */
+    /* 播放进度条 */
+    .progress-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 8px;
+      font-size: 11px; color: #64748b;
+    }
+    .progress-time {
+      min-width: 34px; font-variant-numeric: tabular-nums;
+    }
+    .progress-track {
+      flex: 1; height: 4px;
+      background: rgba(148, 163, 184, 0.2);
+      border-radius: 999px;
+      position: relative;
+      cursor: pointer;
+      touch-action: none;
+    }
+    .progress-fill {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      background: #3b82f6;
+      border-radius: 999px;
+      width: 0%;
+      transition: width 0.15s linear;
+      pointer-events: none;
+    }
+    .progress-thumb {
+      position: absolute; top: 50%;
+      width: 12px; height: 12px;
+      background: white;
+      border-radius: 999px;
+      transform: translate(-50%, -50%);
+      left: 0%;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      pointer-events: none;
+      transition: left 0.15s linear;
+    }
+
+    /* 倍速档位按钮组 */
     .speed-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 4px 4px 0;
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 0 0;
+      justify-content: center;
     }
-    .speed-label {
-      font-size: 12px; color: #94a3b8;
-      min-width: 30px; text-align: left;
+    .speed-label-small {
+      font-size: 11px; color: #64748b; margin-right: 4px;
     }
-    .speed-value {
-      font-size: 13px; color: #93c5fd; font-weight: 600;
-      min-width: 44px; text-align: right;
-    }
-    input[type="range"] {
+    .speed-chip {
       -webkit-appearance: none; appearance: none;
-      flex: 1;
-      height: 4px;
-      background: linear-gradient(to right, #3b82f6 var(--fill, 20%), rgba(148, 163, 184, 0.25) var(--fill, 20%));
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: transparent;
+      color: #cbd5e1;
+      padding: 5px 10px;
       border-radius: 999px;
-      outline: none;
-    }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none; appearance: none;
-      width: 20px; height: 20px;
-      background: white;
-      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
       cursor: pointer;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+      min-height: 30px;
+      transition: all 0.15s;
+      font-variant-numeric: tabular-nums;
     }
-    input[type="range"]::-moz-range-thumb {
-      width: 20px; height: 20px;
-      background: white;
-      border-radius: 999px;
-      border: none;
-      cursor: pointer;
+    .speed-chip:active { transform: scale(0.94); }
+    .speed-chip.active {
+      background: #3b82f6;
+      color: white;
+      border-color: #3b82f6;
+    }
+
+    /* 加载中状态 */
+    .loading-dot {
+      display: inline-block;
+      width: 8px; height: 8px; border-radius: 999px;
+      background: #3b82f6;
+      margin-right: 6px;
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.8); }
+      50% { opacity: 1; transform: scale(1.2); }
     }
 
     .toast {
@@ -255,15 +298,22 @@
   <div class="player" id="player">
     <div class="player-info" id="player-info">--</div>
     <div class="player-content" id="player-content">--</div>
+    <div class="progress-row">
+      <span class="progress-time" id="progress-cur">0:00</span>
+      <div class="progress-track" id="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+        <div class="progress-thumb" id="progress-thumb"></div>
+      </div>
+      <span class="progress-time" id="progress-dur">0:00</span>
+    </div>
     <div class="player-controls">
       <button class="player-btn" id="btn-prev" aria-label="上一条">⏮</button>
       <button class="player-btn main" id="btn-play" aria-label="播放暂停">▶</button>
       <button class="player-btn" id="btn-next" aria-label="下一条">⏭</button>
     </div>
-    <div class="speed-row">
-      <span class="speed-label">倍速</span>
-      <input type="range" id="speed-slider" min="0.5" max="3.0" step="0.1" value="1.0" />
-      <span class="speed-value" id="speed-value">1.0x</span>
+    <div class="speed-row" id="speed-row">
+      <span class="speed-label-small">倍速</span>
+      <!-- 档位按钮由 JS 动态渲染 -->
     </div>
   </div>
 
@@ -481,15 +531,13 @@
       renderList();
     });
 
-    // 倍速滑杆
-    const slider = $('speed-slider');
-    const speedValueEl = $('speed-value');
-    function applySpeedUI() {
-      slider.value = playbackRate.toFixed(1);
-      speedValueEl.textContent = playbackRate.toFixed(1) + 'x';
-      // 滑杆填充色
-      const fill = ((playbackRate - 0.5) / (3.0 - 0.5)) * 100;
-      slider.style.setProperty('--fill', fill + '%');
+    // 倍速档位按钮（0.5 / 1.0 / 1.5 / 2.0 / 2.5 / 3.0）
+    const SPEED_STEPS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+    function renderSpeedChips() {
+      const row = $('speed-row');
+      // 保留第一个 label
+      row.innerHTML = '<span class="speed-label-small">倍速</span>' +
+        SPEED_STEPS.map(s => `<button class="speed-chip ${Math.abs(s - playbackRate) < 0.01 ? 'active' : ''}" data-speed="${s}">${s.toFixed(1)}x</button>`).join('');
     }
     function applySpeedToAudio() {
       try {
@@ -499,15 +547,94 @@
         audio.webkitPreservesPitch = true;
       } catch (e) {}
     }
-    slider.addEventListener('input', () => {
-      playbackRate = parseFloat(slider.value);
-      applySpeedUI();
-      applySpeedToAudio();
+    $('speed-row').addEventListener('click', (e) => {
+      const btn = e.target.closest('.speed-chip');
+      if (!btn) return;
+      playbackRate = parseFloat(btn.dataset.speed);
       localStorage.setItem('xreader.rate', String(playbackRate));
+      renderSpeedChips();
+      applySpeedToAudio();
     });
-    applySpeedUI();
+    renderSpeedChips();
 
-    // 播放器
+    // 进度条
+    const progressFill = $('progress-fill');
+    const progressThumb = $('progress-thumb');
+    const progressCur = $('progress-cur');
+    const progressDur = $('progress-dur');
+    const progressTrack = $('progress-track');
+    function fmtSec(s) {
+      if (!isFinite(s) || s < 0) return '0:00';
+      const m = Math.floor(s / 60);
+      const ss = Math.floor(s % 60).toString().padStart(2, '0');
+      return `${m}:${ss}`;
+    }
+    function updateProgress() {
+      const cur = audio.currentTime || 0;
+      const dur = audio.duration || 0;
+      const pct = dur > 0 ? (cur / dur) * 100 : 0;
+      progressFill.style.width = pct + '%';
+      progressThumb.style.left = pct + '%';
+      progressCur.textContent = fmtSec(cur);
+      progressDur.textContent = fmtSec(dur);
+    }
+    audio.addEventListener('timeupdate', updateProgress);
+    audio.addEventListener('loadedmetadata', updateProgress);
+    audio.addEventListener('durationchange', updateProgress);
+    // 拖动进度条跳转
+    function seekFromEvent(e) {
+      const rect = progressTrack.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      if (audio.duration && isFinite(audio.duration)) {
+        audio.currentTime = audio.duration * ratio;
+      }
+    }
+    progressTrack.addEventListener('click', seekFromEvent);
+    progressTrack.addEventListener('touchstart', (e) => { e.preventDefault(); seekFromEvent(e); }, { passive: false });
+
+    // ---- 播放器：预取下一条 + 单 Audio 实例复用（解决 iOS 锁屏连播问题）----
+    // 预取缓存：Map<tweetId, Promise<blobUrl>>
+    const audioCache = new Map();
+    function prefetchTTS(tweet) {
+      if (!tweet) return null;
+      if (audioCache.has(tweet.id)) return audioCache.get(tweet.id);
+      const p = fetch(API + '/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: tweet.content }),
+      }).then(async r => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.error || `TTS ${r.status}`);
+        }
+        const blob = await r.blob();
+        return URL.createObjectURL(blob);
+      }).catch(e => {
+        audioCache.delete(tweet.id); // 失败的清缓存，允许重试
+        throw e;
+      });
+      audioCache.set(tweet.id, p);
+      // 简单清理：最多缓存 5 条，超了删最老的
+      if (audioCache.size > 5) {
+        const firstKey = audioCache.keys().next().value;
+        const oldUrl = audioCache.get(firstKey);
+        audioCache.delete(firstKey);
+        // 释放 blob URL
+        Promise.resolve(oldUrl).then(u => { try { URL.revokeObjectURL(u); } catch (e) {} }).catch(() => {});
+      }
+      return p;
+    }
+
+    let isLoading = false;
+    function setLoadingUI(loading) {
+      isLoading = loading;
+      const info = $('player-info');
+      if (loading) {
+        info.innerHTML = '<span class="loading-dot"></span>正在生成语音…';
+      }
+    }
+
     async function playCurrent() {
       if (currentIndex < 0 || currentIndex >= queue.length) {
         stopPlayer();
@@ -515,7 +642,6 @@
       }
       const t = queue[currentIndex];
       $('player').classList.add('active');
-      $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}`;
       $('player-content').textContent = t.content;
       $('btn-play').textContent = '⏸';
 
@@ -526,32 +652,38 @@
 
       // 更新 iOS 锁屏信息
       if ('mediaSession' in navigator) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: t.content.slice(0, 80),
-          artist: '@' + t.username,
-          album: 'X Reader',
-        });
+        try {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: t.content.slice(0, 80),
+            artist: '@' + t.username,
+            album: 'X Reader',
+          });
+          navigator.mediaSession.playbackState = 'playing';
+        } catch (e) {}
       }
 
+      // 显示 loading
+      setLoadingUI(true);
+
       try {
-        const r = await fetch(API + '/api/tts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: t.content }),
-        });
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          throw new Error(err.error || 'TTS 失败');
-        }
-        const blob = await r.blob();
-        const url = URL.createObjectURL(blob);
+        // 拿到（缓存或新请求）的 blob URL
+        const url = await prefetchTTS(t);
+        setLoadingUI(false);
+        $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}`;
+
         audio.src = url;
         applySpeedToAudio();
         await audio.play();
-        applySpeedToAudio(); // 部分浏览器需要在 play 之后再设一次
+        applySpeedToAudio(); // Safari 需要 play 后再设一次
+
+        // 关键：立即预取下一条（覆盖 iOS 锁屏后无法发起新请求的限制）
+        const next = queue[currentIndex + 1];
+        if (next) prefetchTTS(next).catch(() => {});
       } catch (e) {
-        toast('播放失败: ' + e.message);
-        setTimeout(nextTrack, 1500);
+        setLoadingUI(false);
+        console.error('[playCurrent] 失败:', e);
+        toast('播放失败: ' + e.message + '（3s 后跳下一条）');
+        setTimeout(() => nextTrack(), 3000);
       }
     }
 
@@ -561,6 +693,9 @@
       $('btn-play').textContent = '▶';
       document.querySelectorAll('.tweet.playing').forEach(el => el.classList.remove('playing'));
       currentIndex = -1;
+      if ('mediaSession' in navigator) {
+        try { navigator.mediaSession.playbackState = 'none'; } catch (e) {}
+      }
     }
 
     async function nextTrack() {
