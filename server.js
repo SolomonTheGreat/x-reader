@@ -94,9 +94,9 @@ function insertTweet(tw) {
 }
 
 function listTweets() {
+  // 返回全部推文，按时间倒序（前端做筛选、排序、分页）
   return [...tweetsStore.values()]
-    .sort((a, b) => (b.pub_date || 0) - (a.pub_date || 0))
-    .slice(0, 200);
+    .sort((a, b) => (b.pub_date || 0) - (a.pub_date || 0));
 }
 
 // ---------- twitterapi.io 抓取 ----------
