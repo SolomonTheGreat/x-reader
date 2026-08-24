@@ -304,7 +304,7 @@
 
   <div class="toast" id="toast"></div>
 
-  <audio id="audio" preload="auto"></audio>
+  <audio id="audio" preload="auto" playsinline webkit-playsinline></audio>
 
   <script>
     const API = '';
@@ -667,14 +667,27 @@
         setLoadingUI(false);
         $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}`;
 
+        // 关键：先 pause + 清 src，避免上一条的 ended 事件跟当前混淆
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
         audio.src = url;
-        applySpeedToAudio();
+        audio.currentTime = 0;
+        // playbackRate 一次性设置在这里，之后不再监听 loadedmetadata 重置
+        audio.playbackRate = playbackRate;
+        try {
+          audio.preservesPitch = true;
+          audio.mozPreservesPitch = true;
+          audio.webkitPreservesPitch = true;
+        } catch (e) {}
         await audio.play();
-        applySpeedToAudio(); // Safari 需要 play 后再设一次
 
-        // 关键：立即预取下一条（覆盖 iOS 锁屏后无法发起新请求的限制）
+        // 立即预取下一条（覆盖 iOS 锁屏后无法发起新请求的限制）
         const next = queue[currentIndex + 1];
         if (next) prefetchTTS(next).catch(() => {});
+        // 预取下下一条（增加冗余，缓解 iOS 后台限制）
+        const nextNext = queue[currentIndex + 2];
+        if (nextNext) prefetchTTS(nextNext).catch(() => {});
       } catch (e) {
         setLoadingUI(false);
         console.error('[playCurrent] 失败:', e);
@@ -715,9 +728,17 @@
       }
     }
 
-    audio.addEventListener('ended', nextTrack);
-    audio.addEventListener('play', applySpeedToAudio);
-    audio.addEventListener('loadedmetadata', applySpeedToAudio);
+    // ended 事件防抖：避免 iOS 切换 src 时触发的假 ended
+    let lastEndedAt = 0;
+    audio.addEventListener('ended', () => {
+      const now = Date.now();
+      if (now - lastEndedAt < 500) return; // 500ms 内的重复 ended 忽略
+      lastEndedAt = now;
+      nextTrack();
+    });
+    // ⚠️ 不要在 play / loadedmetadata 上重复设置 playbackRate ——
+    // iOS Safari 内存回收后会重新触发这些事件，导致 seek 到 0 或跳回开头。
+    // 倍速只在：①用户点档位按钮时 ②audio.src 换新之后一次性设置
 
     $('btn-play').onclick = () => {
       if (audio.paused) {
