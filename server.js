@@ -276,6 +276,31 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
+// 批量 TTS：把多条推文用停顿符拼成一段大音频，前端播放一个 mp3 = iOS 认为一段连续音频
+// 这是绕开 iOS PWA 锁屏挂起 JS 的核心方案
+app.post('/api/tts-batch', async (req, res) => {
+  try {
+    const { texts, voice } = req.body || {};
+    if (!Array.isArray(texts) || !texts.length) return res.status(400).json({ ok: false, error: 'empty texts' });
+    // 用中文句号 + 换行拼接，火山会自然停顿 0.5-1 秒
+    // 单次上限 1024 字符（火山限制），前端应保证 batch 内总字符 < 1000
+    const merged = texts
+      .map(t => (t || '').trim().replace(/[。！？.!?]+$/, ''))
+      .filter(Boolean)
+      .join('。……。');
+    if (!merged) return res.status(400).json({ ok: false, error: 'all empty' });
+    if (merged.length > 1024) return res.status(400).json({ ok: false, error: `merged text too long: ${merged.length} chars (max 1024)` });
+    const audio = await ttsGenerate(merged, voice);
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('X-Batch-Count', String(texts.length));
+    res.send(audio);
+  } catch (e) {
+    console.error('[tts-batch]', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // 保留这些接口以兼容前端，但服务端不存已听状态
 app.post('/api/mark', (req, res) => res.json({ ok: true }));
 app.post('/api/mark-all', (req, res) => res.json({ ok: true }));

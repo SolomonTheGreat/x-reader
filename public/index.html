@@ -589,35 +589,55 @@
     progressTrack.addEventListener('click', seekFromEvent);
     progressTrack.addEventListener('touchstart', (e) => { e.preventDefault(); seekFromEvent(e); }, { passive: false });
 
-    // ---- 播放器：预取下一条 + 单 Audio 实例复用（解决 iOS 锁屏连播问题）----
-    // 预取缓存：Map<tweetId, Promise<blobUrl>>
-    const audioCache = new Map();
-    function prefetchTTS(tweet) {
-      if (!tweet) return null;
-      if (audioCache.has(tweet.id)) return audioCache.get(tweet.id);
-      const p = fetch(API + '/api/tts', {
+    // ---- 播放器：批量 TTS 合成 + 单音频文件 = 绕开 iOS PWA 锁屏挂起 JS 的核心 ----
+    // 每次向前打包 N 条推文合成一个大 mp3，iOS 认为"一段连续音频"，锁屏也不停
+    const BATCH_SIZE = 4;          // 每批多少条
+    const BATCH_MAX_CHARS = 900;   // 单批总字符上限（<火山 1024，留余量给拼接符）
+    // 批次缓存：Map<startIdx, { url, count, endIdx }>
+    const batchCache = new Map();
+
+    function buildBatch(startIdx) {
+      const items = [];
+      let totalChars = 0;
+      for (let i = startIdx; i < queue.length && items.length < BATCH_SIZE; i++) {
+        const t = queue[i];
+        const len = (t.content || '').length;
+        if (totalChars + len > BATCH_MAX_CHARS && items.length > 0) break;
+        items.push(t);
+        totalChars += len;
+      }
+      return items;
+    }
+
+    function prefetchBatch(startIdx) {
+      if (startIdx >= queue.length) return null;
+      if (batchCache.has(startIdx)) return batchCache.get(startIdx);
+      const items = buildBatch(startIdx);
+      if (!items.length) return null;
+      const texts = items.map(t => t.content);
+      const p = fetch(API + '/api/tts-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: tweet.content }),
+        body: JSON.stringify({ texts }),
       }).then(async r => {
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          throw new Error(err.error || `TTS ${r.status}`);
+          throw new Error(err.error || `TTS batch ${r.status}`);
         }
         const blob = await r.blob();
-        return URL.createObjectURL(blob);
+        const url = URL.createObjectURL(blob);
+        return { url, count: items.length, endIdx: startIdx + items.length - 1, items };
       }).catch(e => {
-        audioCache.delete(tweet.id); // 失败的清缓存，允许重试
+        batchCache.delete(startIdx);
         throw e;
       });
-      audioCache.set(tweet.id, p);
-      // 简单清理：最多缓存 5 条，超了删最老的
-      if (audioCache.size > 5) {
-        const firstKey = audioCache.keys().next().value;
-        const oldUrl = audioCache.get(firstKey);
-        audioCache.delete(firstKey);
-        // 释放 blob URL
-        Promise.resolve(oldUrl).then(u => { try { URL.revokeObjectURL(u); } catch (e) {} }).catch(() => {});
+      batchCache.set(startIdx, p);
+      // 只保留最近 3 批
+      if (batchCache.size > 3) {
+        const firstKey = batchCache.keys().next().value;
+        const old = batchCache.get(firstKey);
+        batchCache.delete(firstKey);
+        Promise.resolve(old).then(o => { try { URL.revokeObjectURL(o.url); } catch (e) {} }).catch(() => {});
       }
       return p;
     }
@@ -630,6 +650,10 @@
         info.innerHTML = '<span class="loading-dot"></span>正在生成语音…';
       }
     }
+
+    // 当前正在播的批次（从哪条开始的、包含几条、播完后下一个 startIdx 是多少）
+    let currentBatchStart = -1;
+    let currentBatchEnd = -1;
 
     async function playCurrent() {
       if (currentIndex < 0 || currentIndex >= queue.length) {
@@ -658,22 +682,28 @@
         } catch (e) {}
       }
 
-      // 显示 loading
-      setLoadingUI(true);
-
-      try {
-        // 拿到（缓存或新请求）的 blob URL
-        const url = await prefetchTTS(t);
-        setLoadingUI(false);
+      // 如果 currentIndex 落在当前批次范围内 → 已经在播这个 batch，不用重新拉
+      if (currentIndex >= currentBatchStart && currentIndex <= currentBatchEnd && !audio.paused) {
+        // 高亮更新 + info 即可
         $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}`;
+        return;
+      }
 
-        // 关键：先 pause + 清 src，避免上一条的 ended 事件跟当前混淆
+      setLoadingUI(true);
+      try {
+        const batch = await prefetchBatch(currentIndex);
+        if (!batch) throw new Error('无可播放批次');
+        setLoadingUI(false);
+        $('player-info').textContent = `@${t.username} · ${currentIndex + 1}/${queue.length}（连播 ${batch.count} 条）`;
+
+        currentBatchStart = currentIndex;
+        currentBatchEnd = batch.endIdx;
+
         audio.pause();
         audio.removeAttribute('src');
         audio.load();
-        audio.src = url;
+        audio.src = batch.url;
         audio.currentTime = 0;
-        // playbackRate 一次性设置在这里，之后不再监听 loadedmetadata 重置
         audio.playbackRate = playbackRate;
         try {
           audio.preservesPitch = true;
@@ -682,12 +712,9 @@
         } catch (e) {}
         await audio.play();
 
-        // 立即预取下一条（覆盖 iOS 锁屏后无法发起新请求的限制）
-        const next = queue[currentIndex + 1];
-        if (next) prefetchTTS(next).catch(() => {});
-        // 预取下下一条（增加冗余，缓解 iOS 后台限制）
-        const nextNext = queue[currentIndex + 2];
-        if (nextNext) prefetchTTS(nextNext).catch(() => {});
+        // 预取下一批
+        const nextStart = batch.endIdx + 1;
+        if (nextStart < queue.length) prefetchBatch(nextStart).catch(() => {});
       } catch (e) {
         setLoadingUI(false);
         console.error('[playCurrent] 失败:', e);
@@ -702,28 +729,39 @@
       $('btn-play').textContent = '▶';
       document.querySelectorAll('.tweet.playing').forEach(el => el.classList.remove('playing'));
       currentIndex = -1;
+      currentBatchStart = -1;
+      currentBatchEnd = -1;
       if ('mediaSession' in navigator) {
         try { navigator.mediaSession.playbackState = 'none'; } catch (e) {}
       }
     }
 
     async function nextTrack() {
-      if (currentIndex >= 0 && queue[currentIndex]) {
-        markListened(queue[currentIndex].id);
+      // 标已听：把当前批次里所有条都标记（因为无法精确切分单条边界）
+      if (currentBatchStart >= 0) {
+        for (let i = currentBatchStart; i <= currentBatchEnd && i < queue.length; i++) {
+          markListened(queue[i].id);
+        }
       }
-      currentIndex++;
+      // 跳到下一批的起点
+      currentIndex = currentBatchEnd + 1;
       if (currentIndex >= queue.length) {
         toast('播放完毕');
         stopPlayer();
         loadFeed();
         return;
       }
+      currentBatchStart = -1;
+      currentBatchEnd = -1;
       playCurrent();
     }
 
     function prevTrack() {
-      if (currentIndex > 0) {
-        currentIndex--;
+      // 简单实现：跳到当前批次开头，或者上一批
+      if (currentBatchStart > 0) {
+        currentIndex = Math.max(0, currentBatchStart - BATCH_SIZE);
+        currentBatchStart = -1;
+        currentBatchEnd = -1;
         playCurrent();
       }
     }
