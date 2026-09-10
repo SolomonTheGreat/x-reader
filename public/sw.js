@@ -1,23 +1,34 @@
 // Service Worker · X Reader
-// 最小版：只做 App Shell 缓存，不缓存 API 和音频
-const CACHE = 'x-reader-v1';
+// 网络优先：保证刷新/PWA 重开时拿到最新前端，离线时才回退缓存。
+const CACHE = 'x-reader-v3';
 const SHELL = ['/', '/index.html', '/manifest.json'];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {}));
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).catch(() => {}));
   self.skipWaiting();
 });
-self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))));
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+  );
   self.clients.claim();
 });
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  // API 请求不缓存
-  if (url.pathname.startsWith('/api/')) return;
-  // 音频不缓存（避免占存储）
-  if (e.request.destination === 'audio') return;
-  e.respondWith(
-    caches.match(e.request).then(hit => hit || fetch(e.request).catch(() => caches.match('/')))
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (url.pathname.startsWith('/api/') || event.request.destination === 'audio') return;
+
+  // 页面与静态资源都网络优先；请求成功时更新缓存，断网才用旧版本。
+  event.respondWith(
+    fetch(event.request)
+      .then(response => {
+        if (response && response.ok && event.request.method === 'GET') {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put(event.request, copy)).catch(() => {});
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request).then(hit => hit || caches.match('/')))
   );
 });

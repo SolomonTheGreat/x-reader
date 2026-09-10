@@ -81,7 +81,16 @@ function saveToDisk() {
 }
 
 function insertTweet(tw) {
-  if (tweetsStore.has(tw.id)) return false;
+  const existing = tweetsStore.get(tw.id);
+  if (existing) {
+    // twitterapi.io 的列表接口有时先返回 140 字截断版，后续可能返回更完整的
+    // 只要新正文更长，就更新磁盘里的旧记录
+    if ((tw.content || '').length > (existing.content || '').length) {
+      tweetsStore.set(tw.id, { ...existing, ...tw });
+      saveToDisk();
+    }
+    return false;
+  }
   tweetsStore.set(tw.id, tw);
   // 超出上限时删除最老的
   if (tweetsStore.size > MAX_TWEETS) {
@@ -103,11 +112,36 @@ function listTweets() {
 function cleanTweetText(raw) {
   if (!raw) return '';
   let t = String(raw);
+  // 转推前缀 "RT @username: " 去掉（朗读时不需要听这个）
   t = t.replace(/^RT @[\w_]+:\s*/i, '');
+  // 去 t.co 短链
   t = t.replace(/https?:\/\/t\.co\/\S+/gi, '');
+  // pic.twitter.com 换成图片标记
   t = t.replace(/\bpic\.twitter\.com\/\S+/gi, '');
+  // 归并空白
   t = t.replace(/\s+/g, ' ').trim();
   return t;
+}
+
+// 从推文对象里提取"最完整"的正文
+// 优先级：retweeted_tweet.text > text（如果 text 被 RT 截断） > quoted_tweet.text 拼接
+function extractFullText(tw) {
+  // 1) 纯转推 RT：主 text 是 "RT @xxx: 前140字…" 截断的，完整文在 retweeted_tweet.text
+  if (tw.retweeted_tweet && tw.retweeted_tweet.text) {
+    const rtAuthor = (tw.retweeted_tweet.author && tw.retweeted_tweet.author.userName) || '';
+    const prefix = rtAuthor ? `转发 @${rtAuthor}：` : '转发：';
+    return prefix + cleanTweetText(tw.retweeted_tweet.text);
+  }
+  // 2) 引用推文（自己有话说 + 引用了别人）
+  if (tw.quoted_tweet && tw.quoted_tweet.text) {
+    const myText = cleanTweetText(tw.text || '');
+    const qAuthor = (tw.quoted_tweet.author && tw.quoted_tweet.author.userName) || '';
+    const qText = cleanTweetText(tw.quoted_tweet.text);
+    const qPrefix = qAuthor ? `引用 @${qAuthor}：` : '引用：';
+    return (myText ? myText + '。' : '') + qPrefix + qText;
+  }
+  // 3) 普通推文
+  return cleanTweetText(tw.text || '');
 }
 
 async function fetchUserTweets(username, cursor = '') {
@@ -156,8 +190,7 @@ async function fetchAll(reason = 'unknown', pagesPerUser = 1, opts = {}) {
           totalFetched += tweets.length;
           let pageInserted = 0;
           for (const tw of tweets) {
-            if (tw.retweeted_tweet && !tw.text) continue;
-            const text = cleanTweetText(tw.text);
+            const text = extractFullText(tw);
             if (!text || text.length < 3) continue;
             const authorName = (tw.author && (tw.author.name || tw.author.userName)) || username;
             const pubDate = tw.createdAt ? Date.parse(tw.createdAt) : Date.now();
@@ -204,7 +237,32 @@ async function maybeFetchOnOpen() {
 }
 
 // ---------- 火山 TTS ----------
-async function ttsGenerate(text, voiceType) {
+// 当前火山普通 TTS 对单次文本长度的实际上限约 300 字符。
+// 留安全余量按 240 个 Unicode 字符切段，避免中文/emoji 按 UTF-16 计数时越界。
+const TTS_CHUNK_MAX_CHARS = 240;
+
+function splitTextForTTS(text, maxChars = TTS_CHUNK_MAX_CHARS) {
+  const chars = Array.from(String(text || '').trim());
+  const chunks = [];
+  let start = 0;
+  while (start < chars.length) {
+    let end = Math.min(start + maxChars, chars.length);
+    if (end < chars.length) {
+      // 优先在句号/问号/感叹号/换行/逗号处切，听感更自然
+      const window = chars.slice(start, end).join('');
+      const candidates = ['。', '！', '？', '.', '!', '?', '\n', '；', ';', '，', ','];
+      let best = -1;
+      for (const mark of candidates) best = Math.max(best, window.lastIndexOf(mark));
+      if (best >= Math.floor(maxChars * 0.55)) end = start + best + 1;
+    }
+    const chunk = chars.slice(start, end).join('').trim();
+    if (chunk) chunks.push(chunk);
+    start = end;
+  }
+  return chunks;
+}
+
+async function ttsGenerateChunk(text, voiceType) {
   if (!VOLC_APP_ID || !VOLC_ACCESS_TOKEN) {
     throw new Error('VOLC_APP_ID / VOLC_ACCESS_TOKEN 未配置');
   }
@@ -222,7 +280,7 @@ async function ttsGenerate(text, voiceType) {
     },
     request: {
       reqid: reqId,
-      text: text.slice(0, 1024),
+      text,
       text_type: 'plain',
       operation: 'query',
       with_frontend: 1,
@@ -242,6 +300,46 @@ async function ttsGenerate(text, voiceType) {
     throw new Error(`火山 TTS 失败: code=${data.code} msg=${data.message || ''}`);
   }
   return Buffer.from(data.data, 'base64');
+}
+
+function isVolcTtsLenError(err) {
+  const msg = String(err && err.message || '');
+  return /code\s*=\s*3010/i.test(msg)
+    || /max\s*len/i.test(msg)
+    || /length/i.test(msg);
+}
+
+async function ttsGenerateChunkWithFallback(text, voiceType, depth = 0) {
+  const clean = String(text || '').trim();
+  if (!clean) return Buffer.alloc(0);
+
+  try {
+    return await ttsGenerateChunk(clean, voiceType);
+  } catch (e) {
+    const tooLong = isVolcTtsLenError(e);
+    const charLen = Array.from(clean).length;
+    // 仅在长度相关错误时自动递归二分；防止无限递归，且过短文本直接抛错
+    if (!tooLong || depth >= 6 || charLen <= 20) throw e;
+
+    const splitAt = Math.floor(charLen / 2);
+    const chars = Array.from(clean);
+    const left = chars.slice(0, splitAt).join('');
+    const right = chars.slice(splitAt).join('');
+    const leftBuf = await ttsGenerateChunkWithFallback(left, voiceType, depth + 1);
+    const rightBuf = await ttsGenerateChunkWithFallback(right, voiceType, depth + 1);
+    return Buffer.concat([leftBuf, rightBuf]);
+  }
+}
+
+async function ttsGenerate(text, voiceType) {
+  const chunks = splitTextForTTS(text);
+  if (!chunks.length) throw new Error('empty text');
+  const buffers = [];
+  // 顺序生成并拼接 MP3 帧；浏览器会把它当作一段连续音频播放
+  for (const chunk of chunks) {
+    buffers.push(await ttsGenerateChunkWithFallback(chunk, voiceType));
+  }
+  return Buffer.concat(buffers);
 }
 
 // ---------- API ----------
@@ -289,7 +387,7 @@ app.post('/api/tts-batch', async (req, res) => {
       .filter(Boolean)
       .join('。……。');
     if (!merged) return res.status(400).json({ ok: false, error: 'all empty' });
-    if (merged.length > 1024) return res.status(400).json({ ok: false, error: `merged text too long: ${merged.length} chars (max 1024)` });
+    // ttsGenerate 内部会自动按 240 字切段，长推文/批量推文不会再触发 max len 报错
     const audio = await ttsGenerate(merged, voice);
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'public, max-age=86400');

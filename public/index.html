@@ -766,13 +766,21 @@
       }
     }
 
-    // ended 事件防抖：避免 iOS 切换 src 时触发的假 ended
-    let lastEndedAt = 0;
-    audio.addEventListener('ended', () => {
+    // 自动续播双保险：
+    // 1) 正常走 ended；2) iOS 偶发 ended 不触发时，用 near-end(timeupdate) 兜底
+    let lastAutoNextAt = 0;
+    function safeAutoNext() {
       const now = Date.now();
-      if (now - lastEndedAt < 500) return; // 500ms 内的重复 ended 忽略
-      lastEndedAt = now;
+      if (now - lastAutoNextAt < 800) return; // 防止 ended + near-end 双触发
+      lastAutoNextAt = now;
       nextTrack();
+    }
+    audio.addEventListener('ended', safeAutoNext);
+    audio.addEventListener('timeupdate', () => {
+      const dur = audio.duration;
+      if (!isFinite(dur) || dur <= 0 || audio.paused) return;
+      const left = dur - (audio.currentTime || 0);
+      if (left <= 0.08) safeAutoNext();
     });
     // ⚠️ 不要在 play / loadedmetadata 上重复设置 playbackRate ——
     // iOS Safari 内存回收后会重新触发这些事件，导致 seek 到 0 或跳回开头。
