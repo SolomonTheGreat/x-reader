@@ -423,9 +423,10 @@
       bar.innerHTML = chips.join('');
     }
 
-    async function loadFeed() {
+    let feedLimit = 300; // 默认只拉最近 300 条，首屏加载快；"加载更多"再递增
+    async function loadFeed(limit = feedLimit) {
       try {
-        const r = await fetch(API + '/api/feed');
+        const r = await fetch(API + '/api/feed?limit=' + limit);
         const data = await r.json();
         rawTweets = data.tweets || [];
         subscriptions = data.subscriptions || [];
@@ -445,7 +446,7 @@
         listEl.innerHTML = `<div class="empty"><div class="empty-emoji">🎉</div><div>暂无${showAll ? '' : '未听'}推文<br /><small style="color:#475569">系统每 60 分钟自动抓取一次</small></div></div>`;
         return;
       }
-      listEl.innerHTML = tweets.map((t, i) => `
+      let html = tweets.map((t, i) => `
         <div class="tweet ${isListened(t.id) ? 'listened' : ''}" data-id="${t.id}" data-idx="${i}">
           <div class="tweet-head">
             <span class="author">@${t.username}</span>
@@ -458,6 +459,11 @@
           </div>
         </div>
       `).join('');
+      // 拉到上限说明服务端可能还有更多，底部给"加载更多"
+      if (rawTweets.length >= feedLimit) {
+        html += `<div style="text-align:center;padding:16px 0 8px"><button class="secondary" data-action="load-more">加载更多（当前 ${rawTweets.length} 条）</button></div>`;
+      }
+      listEl.innerHTML = html;
     }
 
     function escapeHtml(s) {
@@ -472,7 +478,11 @@
       const idx = t.dataset.idx;
       const id = t.dataset.id;
 
-      if (action === 'play') {
+      if (action === 'load-more') {
+        feedLimit += 300;
+        toast('加载更多…');
+        loadFeed(feedLimit);
+      } else if (action === 'play') {
         queue = tweets.slice(parseInt(idx, 10));
         currentIndex = 0;
         playCurrent();
@@ -655,7 +665,23 @@
     let currentBatchStart = -1;
     let currentBatchEnd = -1;
 
+    // iOS/Safari 只允许"用户手势内"首次 play()。我们是 点击 → 等 TTS 接口几秒 → play()，
+    // 手势早已失效，会抛 NotAllowedError 导致"点了没声音"。
+    // 解决：在点击的同步阶段先用一段静音音频"解锁"这个 audio 元素，之后换 src 再 play 就被放行。
+    const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    let audioUnlocked = false;
+    function unlockAudio() {
+      if (audioUnlocked) return;
+      audioUnlocked = true;
+      try {
+        audio.src = SILENT_WAV;
+        const p = audio.play();
+        if (p && p.catch) p.catch(() => { audioUnlocked = false; });
+      } catch (e) { audioUnlocked = false; }
+    }
+
     async function playCurrent() {
+      unlockAudio(); // 必须在任何 await 之前（仍处于点击手势内）
       if (currentIndex < 0 || currentIndex >= queue.length) {
         stopPlayer();
         return;
@@ -710,7 +736,19 @@
           audio.mozPreservesPitch = true;
           audio.webkitPreservesPitch = true;
         } catch (e) {}
-        await audio.play();
+        try {
+          await audio.play();
+        } catch (playErr) {
+          // 被系统拦截（非 TTS 问题）：音频已就绪，提示点一下播放键即可，不要自动跳过
+          if (playErr && playErr.name === 'NotAllowedError') {
+            audioUnlocked = false;
+            $('btn-play').textContent = '▶';
+            $('player-info').textContent = '语音已生成，请点 ▶ 开始播放';
+            toast('系统拦截了自动播放，点 ▶ 即可');
+            return;
+          }
+          throw playErr;
+        }
 
         // 预取下一批
         const nextStart = batch.endIdx + 1;
@@ -770,6 +808,7 @@
     // 1) 正常走 ended；2) iOS 偶发 ended 不触发时，用 near-end(timeupdate) 兜底
     let lastAutoNextAt = 0;
     function safeAutoNext() {
+      if (!audio.src || audio.src.startsWith('data:')) return; // 静音解锁音频结束，不算播完
       const now = Date.now();
       if (now - lastAutoNextAt < 800) return; // 防止 ended + near-end 双触发
       lastAutoNextAt = now;

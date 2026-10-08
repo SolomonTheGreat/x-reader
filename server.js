@@ -237,27 +237,42 @@ async function maybeFetchOnOpen() {
 }
 
 // ---------- 火山 TTS ----------
-// 当前火山普通 TTS 对单次文本长度的实际上限约 300 字符。
-// 留安全余量按 240 个 Unicode 字符切段，避免中文/emoji 按 UTF-16 计数时越界。
-const TTS_CHUNK_MAX_CHARS = 240;
+// 火山普通同步 TTS 按 UTF-8 字节计上限（约 1024 字节，部分音色更严）。
+// 之前按「字符数」切段有坑：中文 1 字 = 3 字节，240 个中文字符 = 720 字节，
+// 中英混排 + emoji 时单段极易超限导致整条推文 TTS 失败。
+// 改为按 UTF-8 字节切段，留 800 字节安全余量，多字节字符不再越界。
+const TTS_CHUNK_MAX_BYTES = 800;
 
-function splitTextForTTS(text, maxChars = TTS_CHUNK_MAX_CHARS) {
+function splitTextForTTS(text, maxBytes = TTS_CHUNK_MAX_BYTES) {
   const chars = Array.from(String(text || '').trim());
   const chunks = [];
   let start = 0;
   while (start < chars.length) {
-    let end = Math.min(start + maxChars, chars.length);
+    let end = start;
+    let byteLen = 0;
+    while (end < chars.length) {
+      const charBytes = Buffer.byteLength(chars[end], 'utf8');
+      if (byteLen + charBytes > maxBytes) break;
+      byteLen += charBytes;
+      end++;
+    }
+    if (end === start) { // 单字符就超限（理论上不会，除非 maxBytes < 4），强制前进一步
+      chunks.push(chars[start]);
+      start++;
+      continue;
+    }
+    // 优先在标点处切，听感更自然
+    let cut = end;
     if (end < chars.length) {
-      // 优先在句号/问号/感叹号/换行/逗号处切，听感更自然
-      const window = chars.slice(start, end).join('');
+      const windowStr = chars.slice(start, end).join('');
       const candidates = ['。', '！', '？', '.', '!', '?', '\n', '；', ';', '，', ','];
       let best = -1;
-      for (const mark of candidates) best = Math.max(best, window.lastIndexOf(mark));
-      if (best >= Math.floor(maxChars * 0.55)) end = start + best + 1;
+      for (const mark of candidates) best = Math.max(best, windowStr.lastIndexOf(mark));
+      if (best >= Math.floor((end - start) * 0.55)) cut = start + best + 1;
     }
-    const chunk = chars.slice(start, end).join('').trim();
+    const chunk = chars.slice(start, cut).join('').trim();
     if (chunk) chunks.push(chunk);
-    start = end;
+    start = cut;
   }
   return chunks;
 }
@@ -304,9 +319,11 @@ async function ttsGenerateChunk(text, voiceType) {
 
 function isVolcTtsLenError(err) {
   const msg = String(err && err.message || '');
-  return /code\s*=\s*3010/i.test(msg)
+  return /code\s*=\s*3010/i.test(msg)     // 火山「文本超长」标准错误码
     || /max\s*len/i.test(msg)
-    || /length/i.test(msg);
+    || /too\s*long/i.test(msg)
+    || /length/i.test(msg)
+    || /长度|超限|过长|太长|字数/i.test(msg); // 中文提示兜底
 }
 
 async function ttsGenerateChunkWithFallback(text, voiceType, depth = 0) {
@@ -334,11 +351,20 @@ async function ttsGenerateChunkWithFallback(text, voiceType, depth = 0) {
 async function ttsGenerate(text, voiceType) {
   const chunks = splitTextForTTS(text);
   if (!chunks.length) throw new Error('empty text');
-  const buffers = [];
-  // 顺序生成并拼接 MP3 帧；浏览器会把它当作一段连续音频播放
-  for (const chunk of chunks) {
-    buffers.push(await ttsGenerateChunkWithFallback(chunk, voiceType));
+  // 并发生成（限 3 路），显著缩短长文本/批量 TTS 的等待时间；
+  // 用下标占位 + 按序 concat，保证多段音频顺序正确（浏览器当作一段连续音频播放）
+  const CONCURRENCY = 3;
+  const buffers = new Array(chunks.length);
+  let next = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const i = next++;
+      buffers[i] = await ttsGenerateChunkWithFallback(chunks[i], voiceType);
+    }
   }
+  const workers = [];
+  for (let w = 0; w < Math.min(CONCURRENCY, chunks.length); w++) workers.push(worker());
+  await Promise.all(workers);
   return Buffer.concat(buffers);
 }
 
@@ -351,11 +377,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 打开 App 时如果距上次抓取超过阈值就顺手触发一次（非阻塞）
 app.get('/api/feed', (req, res) => {
   maybeFetchOnOpen(); // fire and forget
+  const all = listTweets();
+  // 支持 limit：前端默认只拉最近 N 条，避免 1500+ 条全量返回导致首屏加载慢
+  const limit = parseInt(req.query.limit, 10);
+  const tweets = Number.isFinite(limit) && limit > 0 ? all.slice(0, limit) : all;
   res.json({
     ok: true,
     count: tweetsStore.size,
+    returned: tweets.length,
     subscriptions: SUBSCRIPTIONS,
-    tweets: listTweets(),
+    tweets,
     last_fetch_at: lastFetchAt,
   });
 });
